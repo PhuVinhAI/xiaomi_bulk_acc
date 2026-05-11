@@ -1,0 +1,19 @@
+{
+  "name": "xiaomi_bulk_acc",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.59.1"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "tsx": "^4"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "start:2": "tsx src/index.ts --workers 2",
+    "start:3": "tsx src/index.ts --workers 3",
+    "start:loop": "tsx src/index.ts --loop",
+    "start:loop:2": "tsx src/index.ts --loop --workers 2"
+  }
+}
