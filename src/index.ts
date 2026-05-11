@@ -179,7 +179,27 @@ async function registerXiaomi(
   await submitBtn.click();
 
   console.log(`${prefix} Waiting for CAPTCHA to be passed (no timeout)...`);
-  await page.waitForSelector('input[name="ticket"]', { timeout: 0 });
+
+  while (true) {
+    await page.waitForTimeout(3000);
+
+    const errorMsg = page.locator('.mi-form-helper-text--error');
+    if (await errorMsg.count() > 0) {
+      const errText = (await errorMsg.textContent()) || "";
+      if (errText.includes("isn't safe") || errText.includes("not safe")) {
+        console.log(`${prefix} Email rejected: ${errText}`);
+        await xiaomiContext.close();
+        throw new Error("EMAIL_REJECTED");
+      }
+    }
+
+    const ticketInput = page.locator('input[name="ticket"]');
+    if (await ticketInput.count() > 0) {
+      console.log(`${prefix} CAPTCHA passed.`);
+      break;
+    }
+  }
+
   console.log(`${prefix} CAPTCHA passed, verification page loaded.`);
 
   console.log(`${prefix} Getting verification code from temp-mail...`);
@@ -236,18 +256,24 @@ async function handlePlatformProfile(
     waitUntil: "domcontentloaded",
     timeout: 60000,
   });
+  await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(3000);
 
-  const modalVisible = await page.locator('.ant-modal .ant-checkbox-input').count();
-  if (modalVisible > 0) {
-    console.log(`${prefix} Agreeing to Terms popup...`);
-    await page.check('.ant-modal .ant-checkbox-input');
+  console.log(`${prefix} Checking for Terms popup...`);
+  try {
+    const checkbox = page.locator('.ant-modal .ant-checkbox-input').first();
+    await checkbox.waitFor({ state: "visible", timeout: 15000 });
+    console.log(`${prefix} Terms popup found! Agreeing...`);
+    await checkbox.check();
     await page.waitForTimeout(500);
 
     const confirmBtn = page.locator('.ant-modal-footer button').last();
     await confirmBtn.waitFor({ state: "visible", timeout: 5000 });
     await confirmBtn.click();
-    await page.waitForTimeout(2000);
+    console.log(`${prefix} Terms accepted.`);
+    await page.waitForTimeout(3000);
+  } catch {
+    console.log(`${prefix} No Terms popup found, skipping.`);
   }
 
   await ensurePlatformSession(page, prefix);
@@ -373,35 +399,61 @@ async function runPair(browser: Browser, workerId: number, collectedKeys: string
   const p2 = logPrefix(workerId, 2);
 
   try {
-    console.log(`${p1} Setting up temp-mail...`);
-    const temp1 = await setupTempMail(browser);
+    // === ACC 1 ===
+    let result1: { apiKey: string; inviteCode?: string } | null = null;
+    for (let retry = 0; retry < 5; retry++) {
+      console.log(`${p1} Setting up temp-mail (attempt ${retry + 1})...`);
+      const temp1 = await setupTempMail(browser);
+      try {
+        console.log(`${p1} Registering on Xiaomi...`);
+        const xiaomi1 = await registerXiaomi(browser, temp1.context, temp1.email, temp1.token, p1);
 
-    console.log(`${p1} Registering on Xiaomi...`);
-    const xiaomi1 = await registerXiaomi(browser, temp1.context, temp1.email, temp1.token, p1);
+        console.log(`${p1} Handling platform (get invite code + API key)...`);
+        result1 = await handlePlatformProfile(xiaomi1, "getInviteCode", p1);
+        console.log(`${p1} Done! Key: ${result1.apiKey}, Invite: ${result1.inviteCode}`);
+        appendKey(result1.apiKey);
+        collectedKeys.push(result1.apiKey);
 
-    console.log(`${p1} Handling platform (get invite code + API key)...`);
-    const result1 = await handlePlatformProfile(xiaomi1, "getInviteCode", p1);
-    console.log(`${p1} Done! Key: ${result1.apiKey}, Invite: ${result1.inviteCode}`);
-    appendKey(result1.apiKey);
-    collectedKeys.push(result1.apiKey);
+        await temp1.context.close();
+        await xiaomi1.close();
+        break;
+      } catch (err: any) {
+        await temp1.context.close();
+        if (err.message === "EMAIL_REJECTED") {
+          console.log(`${p1} Email rejected, getting new email and retrying...`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!result1) throw new Error(`${p1} Failed after 5 email retries`);
 
-    await temp1.context.close();
-    await xiaomi1.close();
+    // === ACC 2 ===
+    for (let retry = 0; retry < 5; retry++) {
+      console.log(`${p2} Setting up temp-mail (attempt ${retry + 1})...`);
+      const temp2 = await setupTempMail(browser);
+      try {
+        console.log(`${p2} Registering on Xiaomi...`);
+        const xiaomi2 = await registerXiaomi(browser, temp2.context, temp2.email, temp2.token, p2);
 
-    console.log(`${p2} Setting up temp-mail (new context)...`);
-    const temp2 = await setupTempMail(browser);
+        console.log(`${p2} Handling platform (enter invite code + API key)...`);
+        const result2 = await handlePlatformProfile(xiaomi2, "enterInviteCode", p2, result1.inviteCode);
+        console.log(`${p2} Done! Key: ${result2.apiKey}`);
+        appendKey(result2.apiKey);
+        collectedKeys.push(result2.apiKey);
 
-    console.log(`${p2} Registering on Xiaomi...`);
-    const xiaomi2 = await registerXiaomi(browser, temp2.context, temp2.email, temp2.token, p2);
-
-    console.log(`${p2} Handling platform (enter invite code + API key)...`);
-    const result2 = await handlePlatformProfile(xiaomi2, "enterInviteCode", p2, result1.inviteCode);
-    console.log(`${p2} Done! Key: ${result2.apiKey}`);
-    appendKey(result2.apiKey);
-    collectedKeys.push(result2.apiKey);
-
-    await temp2.context.close();
-    await xiaomi2.close();
+        await temp2.context.close();
+        await xiaomi2.close();
+        break;
+      } catch (err: any) {
+        await temp2.context.close();
+        if (err.message === "EMAIL_REJECTED") {
+          console.log(`${p2} Email rejected, getting new email and retrying...`);
+          continue;
+        }
+        throw err;
+      }
+    }
 
     return true;
   } catch (err: any) {
