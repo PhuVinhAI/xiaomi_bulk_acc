@@ -35,6 +35,48 @@ function appendKey(key: string) {
   console.log(`  Key appended to ${KEYS_FILE}: ${key}`);
 }
 
+function generateKeysHtml(keys: string[]) {
+  const rows = keys.map((k, i) => `<tr><td>${i + 1}</td><td><code id="key${i}">${k}</code></td><td><button onclick="copyKey('key${i}')">Copy</button></td></tr>`).join("\n");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>API Keys</title>
+<style>
+  body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 40px; }
+  h1 { color: #0f3460; font-size: 24px; }
+  table { border-collapse: collapse; width: 100%; max-width: 900px; margin-top: 20px; }
+  th, td { border: 1px solid #333; padding: 10px 16px; text-align: left; }
+  th { background: #16213e; color: #e94560; }
+  td { background: #0f3460; }
+  code { font-size: 14px; color: #53d769; word-break: break-all; }
+  button { background: #e94560; color: white; border: none; padding: 6px 16px; cursor: pointer; border-radius: 4px; font-size: 13px; }
+  button:hover { background: #c73e54; }
+  .copied { background: #53d769 !important; }
+  .count { color: #e94560; font-size: 18px; }
+</style>
+</head>
+<body>
+<h1>API Keys <span class="count">(${keys.length})</span></h1>
+<table>
+<tr><th>#</th><th>Key</th><th>Action</th></tr>
+${rows}
+</table>
+<script>
+function copyKey(id) {
+  const text = document.getElementById(id).textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById(id).closest('tr').querySelector('button');
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+</script>
+</body>
+</html>`;
+}
+
 function logPrefix(workerId: number, accNum: 1 | 2) {
   return `[W${workerId}-ACC${accNum}]`;
 }
@@ -326,7 +368,7 @@ async function createApiKey(page: Page, prefix: string, maxRetries = 5): Promise
   throw new Error(`${prefix} Failed to create API key after max retries`);
 }
 
-async function runPair(browser: Browser, workerId: number): Promise<{ key1: string; key2: string; inviteCode: string } | null> {
+async function runPair(browser: Browser, workerId: number, collectedKeys: string[]): Promise<boolean> {
   const p1 = logPrefix(workerId, 1);
   const p2 = logPrefix(workerId, 2);
 
@@ -341,6 +383,7 @@ async function runPair(browser: Browser, workerId: number): Promise<{ key1: stri
     const result1 = await handlePlatformProfile(xiaomi1, "getInviteCode", p1);
     console.log(`${p1} Done! Key: ${result1.apiKey}, Invite: ${result1.inviteCode}`);
     appendKey(result1.apiKey);
+    collectedKeys.push(result1.apiKey);
 
     await temp1.context.close();
     await xiaomi1.close();
@@ -355,14 +398,15 @@ async function runPair(browser: Browser, workerId: number): Promise<{ key1: stri
     const result2 = await handlePlatformProfile(xiaomi2, "enterInviteCode", p2, result1.inviteCode);
     console.log(`${p2} Done! Key: ${result2.apiKey}`);
     appendKey(result2.apiKey);
+    collectedKeys.push(result2.apiKey);
 
     await temp2.context.close();
     await xiaomi2.close();
 
-    return { key1: result1.apiKey, key2: result2.apiKey, inviteCode: result1.inviteCode || "" };
+    return true;
   } catch (err: any) {
     console.log(`[W${workerId}] Pair failed: ${err.message}`);
-    return null;
+    return false;
   }
 }
 
@@ -373,7 +417,8 @@ async function main() {
   console.log(`  Workers: ${workers} | Pairs: ${loop ? "infinite" : pairs} | Keys file: ${KEYS_FILE}\n`);
 
   const browser = await chromium.launch({ headless: false });
-  let totalKeys = 0;
+  const collectedKeys: string[] = [];
+  let totalPairs = 0;
   let pairIndex = 0;
 
   const shouldContinue = () => loop || pairIndex < pairs;
@@ -385,27 +430,36 @@ async function main() {
 
     for (let w = 0; w < batch; w++) {
       const wid = pairIndex * 10 + w + 1;
-      promises.push(runPair(browser, wid));
+      promises.push(runPair(browser, wid, collectedKeys));
     }
 
     if (promises.length === 1) {
-      const result = await promises[0];
-      if (result) totalKeys += 2;
+      const ok = await promises[0];
+      if (ok) totalPairs++;
     } else {
       const results = await Promise.allSettled(promises);
       for (const r of results) {
-        if (r.status === "fulfilled" && r.value) totalKeys += 2;
+        if (r.status === "fulfilled" && r.value) totalPairs++;
       }
     }
 
-    console.log(`\n=== Batch ${pairIndex} done. Total keys so far: ${totalKeys} ===\n`);
+    console.log(`\n=== Batch ${pairIndex} done. Total pairs: ${totalPairs} | Keys: ${collectedKeys.length} ===\n`);
 
     if (!loop && workers > 1) {
       pairIndex += batch - 1;
     }
   }
 
-  console.log(`\n=== ALL DONE! Total keys: ${totalKeys} written to ${KEYS_FILE} ===`);
+  console.log(`\n=== ALL DONE! ${collectedKeys.length} keys written to ${KEYS_FILE} ===`);
+
+  if (collectedKeys.length > 0) {
+    const htmlFile = path.join(process.cwd(), "keys.html");
+    fs.writeFileSync(htmlFile, generateKeysHtml(collectedKeys));
+    console.log(`Opening ${htmlFile} in browser...`);
+    const summaryPage = await browser.newPage();
+    await summaryPage.goto(`file:///${htmlFile.replace(/\\/g, "/")}`);
+  }
+
   await browser.close();
 }
 
