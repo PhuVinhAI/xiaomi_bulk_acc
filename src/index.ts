@@ -1,9 +1,21 @@
 import { chromium, type Page, type Browser, type BrowserContext } from "playwright";
+import * as readline from "readline";
 import * as fs from "fs";
 import * as path from "path";
 
 const PASSWORD = "tomi1234";
 const KEYS_FILE = path.join(process.cwd(), "keys.txt");
+const INVITE_FILE = path.join(process.cwd(), "invite.txt");
+
+function askContinue(msg: string): Promise<void> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(`\n>>> ${msg} (Press Enter to continue...)`, () => {
+      rl.close();
+      resolve();
+    });
+  });
+}
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -207,7 +219,9 @@ async function handlePlatformProfile(
       return await res.json();
     });
     const extractedCode = (inviteResult as any)?.data?.invitationCode || "";
-    console.log(`${prefix} Invite code:`, extractedCode);
+    console.log(`${prefix} Invite code: ${extractedCode}`);
+    fs.writeFileSync(INVITE_FILE, extractedCode);
+    console.log(`${prefix} Invite code saved to ${INVITE_FILE}`);
 
     console.log(`${prefix} Navigating to API Keys page...`);
     await page.goto("https://platform.xiaomimimo.com/console/api-keys", {
@@ -221,22 +235,13 @@ async function handlePlatformProfile(
   }
 
   if (mode === "enterInviteCode" && inviteCode) {
-    console.log(`${prefix} Entering invite code via API:`, inviteCode);
-    const bindResult = await page.evaluate(async (code: string) => {
-      try {
-        const ph = document.cookie.match(/api-platform_ph=([^;]+)/);
-        const phParam = ph ? `?api-platform_ph=${encodeURIComponent(ph[1])}` : "";
-        const res = await fetch(`/api/v1/invitation/bind${phParam}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ inviteCode: code }),
-        });
-        return await res.json();
-      } catch (e: any) {
-        return { code: -1, message: e.message };
-      }
-    }, inviteCode);
-    console.log(`${prefix} Bind result:`, JSON.stringify(bindResult));
+    console.log(`${prefix} ============================================`);
+    console.log(`${prefix} INVITE CODE: ${inviteCode}`);
+    console.log(`${prefix} Please enter this code manually in the browser.`);
+    console.log(`${prefix} 1. Click the "Enter invite code" button`);
+    console.log(`${prefix} 2. Type the code: ${inviteCode}`);
+    console.log(`${prefix} 3. Click "Redeem"`);
+    console.log(`${prefix} ============================================`);
 
     console.log(`${prefix} Navigating to API Keys page...`);
     await page.goto("https://platform.xiaomimimo.com/console/api-keys", {
@@ -244,6 +249,8 @@ async function handlePlatformProfile(
       timeout: 30000,
     });
     await page.waitForTimeout(3000);
+
+    await askContinue("After entering invite code in browser, press Enter");
 
     const apiKey = await createApiKey(page, prefix);
     return { apiKey };
